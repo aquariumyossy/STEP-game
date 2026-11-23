@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>STEP — walk to the beat</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #14101f; }
+  #transport {
+    position: fixed; top: 10px; right: 12px; z-index: 6; display: flex; gap: 6px;
+  }
+  #transport button {
+    font: 13px ui-monospace, Menlo, monospace; color: rgba(255,255,255,.85);
+    background: rgba(20,16,31,.55); border: 1px solid rgba(255,255,255,.28);
+    border-radius: 6px; padding: 6px 10px; cursor: pointer;
+  }
+  #lyric {
+    position: fixed; left: 10px; right: 6px; top: 12px; z-index: 5; overflow: hidden;
+    height: 4.6em; font: 13.5px/1.55 ui-monospace, Menlo, monospace; color: #fff;
+    text-shadow: 0 1px 4px rgba(0,0,0,.9); pointer-events: none; white-space: pre;
+    -webkit-mask-image: linear-gradient(to bottom, rgba(0,0,0,.15), rgba(0,0,0,.15) 8%, #000 40%, #000 58%, rgba(0,0,0,.14) 90%);
+            mask-image: linear-gradient(to bottom, rgba(0,0,0,.15), rgba(0,0,0,.15) 8%, #000 40%, #000 58%, rgba(0,0,0,.14) 90%);
+  }
+  #lyric > div { will-change: transform; transition: transform .55s cubic-bezier(.25,.8,.3,1); }
+  #lyric p { margin: 0; }
+
+  #hud {
+    position: fixed; left: 14px; top: 10px; z-index: 5;
+    font: 12px/1.7 ui-monospace, Menlo, monospace; color: rgba(255,255,255,.75);
+    text-shadow: 0 1px 3px rgba(0,0,0,.8); pointer-events: none;
+    white-space: pre;
+  }
+  #start {
+    position: fixed; inset: 0; z-index: 10; display: flex; align-items: center; justify-content: center;
+    background: rgba(10,8,16,.72); backdrop-filter: blur(3px);
+    color: #fff; font: 15px/2 ui-monospace, Menlo, monospace; text-align: center;
+    transition: opacity .5s;
+  }
+  #start.hidden { opacity: 0; pointer-events: none; }
+  #start b { font-size: 26px; letter-spacing: .35em; display: block; margin-bottom: 18px;
+    opacity: .4; transition: opacity .6s, text-shadow .6s; }
+  #start.lit b { opacity: 1; text-shadow: 0 0 18px rgba(255,236,190,.9), 0 0 46px rgba(255,210,140,.55);
+    animation: steppulse 1.6s ease-in-out infinite; }
+  @keyframes steppulse {
+    0%, 100% { text-shadow: 0 0 14px rgba(255,236,190,.75), 0 0 36px rgba(255,210,140,.4); }
+    50% { text-shadow: 0 0 26px rgba(255,242,205,1), 0 0 70px rgba(255,214,150,.75); }
+  }
+  #loadbar { width: 240px; height: 3px; margin: 0 auto; border-radius: 999px;
+    background: rgba(255,255,255,.16); overflow: hidden; transition: opacity .5s; }
+  #loadbar i { display: block; height: 100%; width: 0%; border-radius: 999px;
+    background: #f0dcb4; transition: width .35s ease; }
+  #start.lit #loadbar { opacity: 0; }
+  #charbar {
+    position: fixed; right: 16px; bottom: 14px; z-index: 6;
+    display: flex; flex-direction: column; gap: 8px; opacity: 0; transition: opacity .5s;
+    align-items: flex-end;
+  }
+  #charbar.show { opacity: 1; }
+  #charbar button {
+    font: 11px/1 ui-monospace, Menlo, monospace; letter-spacing: .08em;
+    padding: 8px 14px; border-radius: 999px; cursor: pointer;
+    border: 1px solid rgba(255,255,255,.28); background: rgba(20,16,31,.55);
+    color: rgba(255,255,255,.55); backdrop-filter: blur(4px);
+    transition: background .2s, color .2s, border-color .2s;
+  }
+  #charbar button.on {
+    background: rgba(240,220,180,.92); color: #241a10;
+    border-color: rgba(240,220,180,.92);
+  }
+  #charbar button:disabled { opacity: .35; cursor: default; }
+  #pad {
+    position: fixed; left: 14px; bottom: 12px; z-index: 6;
+    display: grid; grid-template-columns: repeat(3, auto); grid-template-rows: repeat(3, auto);
+    gap: 6px; opacity: 0; transition: opacity .5s;
+    touch-action: manipulation; -webkit-user-select: none; user-select: none;
+  }
+  #pad.show { opacity: 1; }
+  #pad button {
+    width: 58px; height: 58px; border-radius: 50%;
+    font: 600 17px/1 ui-monospace, Menlo, monospace;
+    border: 1px solid rgba(255,255,255,.30); background: rgba(20,16,31,.55);
+    color: rgba(255,255,255,.75); backdrop-filter: blur(4px);
+    cursor: pointer; touch-action: manipulation;
+    transition: background .12s, color .12s, transform .08s;
+  }
+  #pad button:active, #pad button.hit {
+    background: rgba(240,220,180,.92); color: #241a10; transform: scale(.94);
+  }
+  #pad .top { grid-column: 2; grid-row: 1; }
+  #pad .left { grid-column: 1; grid-row: 2; }
+  #pad .right { grid-column: 3; grid-row: 2; }
+  #pad .bottom { grid-column: 2; grid-row: 3; }
+  #pad button.walk { border-color: rgba(120,220,160,.6); }
+  #pad .center { grid-column: 2; grid-row: 2; width: 40px; height: 40px; font-size: 13px; opacity: .55; }
+  @media (pointer: coarse) {
+    #pad button { width: 76px; height: 76px; font-size: 21px; }
+    #pad { gap: 9px; left: 16px; bottom: 16px; }
+  }
+</style>
+</head>
+<body>
+<div id="hud"></div>
+<div id="transport"><button id="tback">«</button><button id="tpause">❚❚</button><button id="tfwd">»</button></div>
+<div id="lyric"></div>
+<div id="pad">
+  <button class="top" data-step="1">S</button>
+  <button class="left walk" data-step="0">A</button>
+  <button class="right" data-step="2">D</button>
+  <button class="bottom" data-step="3">F</button>
+  <button class="center" id="padW">W</button>
+</div>
+<div id="charbar">
+  <button id="cBoy" disabled title="B で切替">Timmy</button>
+  <button id="cGirl" disabled title="B で切替">Claire</button>
+  <button id="cAj" disabled title="B で切替">Aj</button>
+  <button id="cRobot" disabled title="B で切替">Morph</button>
+</div>
+<div id="start"><div>
+<b>STEP</b>
+<div id="loadbar"><i></i></div>
+<div id="ver" style="position:fixed;left:10px;bottom:8px;font:11px ui-monospace,monospace;color:#555">v0.1.0 · b460</div>
+<div id="cred" style="position:fixed;left:0;right:0;bottom:8px;text-align:center;font:10px ui-monospace,monospace;color:#3d4250;pointer-events:none">made by Shuhei Yoshida · Qwen · Strata · YuE2 · Linger · ISTA-DASLab · Mixamo · Quaternius · Poly Haven · three.js</div>
+</div></div>
+<script type="importmap">
+  { "imports": { "three": "./vendor/three.module.js" } }
+</script>
+<script type="module" src="./main.js?v=460"></script>
+</body>
+</html>
