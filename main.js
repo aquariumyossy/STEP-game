@@ -318,6 +318,50 @@ const skyMat = new THREE.ShaderMaterial({
   side: THREE.BackSide, depthWrite: false, fog: false,
 });
 const skyDome = new THREE.Mesh(new THREE.SphereGeometry(460, 32, 20), skyMat);
+// twinkling stars for the opening night: a countable handful (~90), high over
+// the horizon, each with its own slow beat; they thin out with the far sunrise
+// curve so they're gone by the time the sky turns morning
+const starMat = new THREE.ShaderMaterial({
+  uniforms: { uT: { value: 0 }, uNight: { value: 1 }, uPx: { value: Math.min(2, devicePixelRatio || 1) } },
+  vertexShader: `
+    attribute float aSeed;
+    varying float vA;
+    uniform float uT; uniform float uNight; uniform float uPx;
+    void main() {
+      float f = 0.35 + 1.6 * aSeed;                       // each star twinkles at its own pace
+      float tw = 0.5 + 0.5 * sin(uT * f * 6.2831 + aSeed * 41.0);
+      vA = uNight * (0.34 + 0.66 * tw) * (0.62 + 0.38 * aSeed);
+      gl_PointSize = uPx * (1.8 + 1.9 * aSeed) * (0.78 + 0.42 * tw);
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }`,
+  fragmentShader: `
+    varying float vA;
+    void main() {
+      float d = length(gl_PointCoord - 0.5);
+      float a = vA * smoothstep(0.5, 0.10, d);
+      if (a <= 0.004) discard;
+      gl_FragColor = vec4(vec3(0.92, 0.95, 1.0), a);
+    }`,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, fog: false,
+});
+{
+  const NS = 90, spos = new Float32Array(NS * 3), sseed = new Float32Array(NS);
+  for (let i = 0; i < NS; i++) {
+    const el = (14 + Math.random() * 66) * Math.PI / 180; // keep clear of the haze line
+    const az = Math.random() * Math.PI * 2;
+    const rr = 430; // just inside the sky dome, so buildings occlude them honestly
+    spos[i * 3] = rr * Math.cos(el) * Math.sin(az);
+    spos[i * 3 + 1] = rr * Math.sin(el);
+    spos[i * 3 + 2] = rr * Math.cos(el) * Math.cos(az);
+    sseed[i] = Math.random();
+  }
+  const starGeo = new THREE.BufferGeometry();
+  starGeo.setAttribute('position', new THREE.BufferAttribute(spos, 3));
+  starGeo.setAttribute('aSeed', new THREE.BufferAttribute(sseed, 1));
+  var starPts = new THREE.Points(starGeo, starMat);
+  starPts.frustumCulled = false;
+  scene.add(starPts);
+}
 const moonDisc = new THREE.Mesh(new THREE.SphereGeometry(9, 24, 24),
   new THREE.MeshBasicMaterial({ color: 0xfff0e8, fog: false, transparent: true }));
 let sunGlowRef = null;
@@ -1720,10 +1764,53 @@ function loadMorph() {
     const box = new THREE.Box3().setFromObject(m);
     const h = box.max.y - box.min.y;
     m.scale.setScalar(0.68 / h); // Morph: half size, chibi-friend of the roster
+    // Sole-truth measurement (union of skinned meshes vs raycast road): at lift
+    // 33 mm the walk's deepest frame sat ~14 mm under the asphalt; 49 mm brought
+    // it to road-3 mm. 55 mm adds the margin that keeps the ball-feet visibly
+    // clear of the road at the phone camera's lower angle.
+    m.position.y = MORPH_LIFT;
     player.add(m);
     const mixer = new THREE.AnimationMixer(m);
     const acts = {};
     for (const clip of gltf.animations) acts[clip.name] = mixer.clipAction(clip);
+    // THE post-action sink, found by auditing the clip itself: the pack's Walking
+    // clip never writes Hips — no position track, no rotation track. Our step clips
+    // DO move Hips (hop/yaw/pitch), and when an action crossfades out, nothing pulls
+    // Hips back: the robot kept walking with his hips parked wherever the last action
+    // left them — sunk or tilted. Pin Hips to its bind transform across the whole
+    // Walking clip so any return to walking blends the body back to standing height.
+    let hipsBone = null;
+    m.traverse((o) => { if (!hipsBone && o.name === 'Hips') hipsBone = o; });
+    if (hipsBone) {
+      // Defensive pin: strip Hips.position from any pack clip that carries one,
+      // so a future clip swap can't reintroduce hip-drift. (Measured on this
+      // pack: none of them actually write Hips.position — the sink we chased
+      // came from our own step clips leaving Hips parked when they faded out,
+      // which the Walking pin below fixes.)
+      const p = hipsBone.position, q = hipsBone.quaternion;
+      let nPin = 0;
+      for (const c of gltf.animations) {
+        const keep = c.tracks.filter((t) => t.name !== 'Hips.position');
+        if (keep.length !== c.tracks.length) {
+          c.tracks = keep.concat([new THREE.VectorKeyframeTrack('Hips.position',
+            [0, c.duration], [p.x, p.y, p.z, p.x, p.y, p.z])]);
+          mixer.uncacheClip(c);
+          nPin++;
+        }
+      }
+      const wc = gltf.animations.find((c) => c.name === 'Walking');
+      if (wc) {
+        // Walking ships with NO hips tracks at all (that's what left the body
+        // parked after actions) — give it both pins explicitly.
+        const D = wc.duration;
+        wc.tracks.push(new THREE.VectorKeyframeTrack('Hips.position', [0, D],
+          [p.x, p.y, p.z, p.x, p.y, p.z]));
+        wc.tracks.push(new THREE.QuaternionKeyframeTrack('Hips.quaternion', [0, D],
+          [q.x, q.y, q.z, q.w, q.x, q.y, q.z, q.w]));
+        mixer.uncacheClip(wc);
+      }
+      acts.Walking = mixer.clipAction(wc);
+    }
     const walk = acts.Walking;
     const idle = acts.Idle || walk;
     const dance = acts.Dance || walk;
@@ -2374,10 +2461,13 @@ const CHOREO = {
     Lkn:[0,0.2, 0.5,0.3, 0.9,0.5, 1.5,0.6, 2.3,0.4, 3.0,0.7, 3.4,0.3, 4,0.2],
     Rkn:[0,0.2, 0.18,0.7, 0.36,0.25, 0.56,0.8, 0.76,0.3, 1.0,0.55, 1.5,0.6, 2.3,0.4, 3.0,0.65, 3.4,0.28, 4,0.2],
     // arms fling forward and straight, leading the fall — not tucked to the chest
-    armL:[0,0, 0.4,-0.55, 0.8,-1.35, 1.4,-1.6, 2.2,-1.0, 2.9,-0.35, 3.4,0.1, 4,0],
-    armR:[0,0, 0.4,-0.5, 0.8,-1.4, 1.4,-1.5, 2.2,-1.1, 2.9,-0.3, 3.4,0.1, 4,0],
-    foreL:[0,0.2, 0.8,0.12, 1.5,0.1, 2.4,0.55, 3.2,0.25, 4,0.2],
-    foreR:[0,0.2, 0.8,0.1, 1.5,0.15, 2.4,0.5, 3.2,0.25, 4,0.2],
+    // bone-hunt: the swing keys drove the FINGER-claw bones to −23 cm (the
+    // rig's arm axis turns 'forward' into a backward-down arc on this model).
+    // Arms now stay close with elbows bent; nothing points down during the fall
+    armL:[0,0, 0.4,0.15, 0.8,0.3, 1.4,0.3, 2.2,0.2, 2.9,0.08, 3.4,0, 4,0],
+    armR:[0,0, 0.4,0.12, 0.8,0.28, 1.4,0.3, 2.2,0.18, 2.9,0.06, 3.4,0, 4,0],
+    foreL:[0,0.3, 0.8,0.8, 1.5,1.0, 2.4,0.7, 3.2,0.3, 4,0.25],
+    foreR:[0,0.3, 0.8,0.8, 1.5,1.05, 2.4,0.65, 3.2,0.3, 4,0.25],
     ftL:[0,0.15, 0.95,-0.5, 1.6,-0.4, 2.4,0.15, 3.2,0.1, 4,0.15],
     ftR:[0,0.15, 0.95,-0.5, 1.6,-0.4, 2.4,0.15, 3.2,0.1, 4,0.15],
     hipR:[0,0, 0.5,0.08, 1.0,-0.06, 1.6,0.03, 2.2,0, 4,0] },
@@ -2903,6 +2993,10 @@ const KEYMAP = {
 const STOPSTEP = [false, true, true, true];
 let activeStep = null, lastTrig = -9, stopAmt = 0, playerYaw = 0;
 // Morph's jet dash carries real ground distance: an eased push along +z while it plays
+// Morph's standing lift. Every writer must use this constant: the fall/jet
+// root-motion used to end by writing y=0, which parked the soles 30 mm UNDER
+// the road plane — the real "sinks after D/F" the user kept seeing.
+const MORPH_LIFT = 0.055;
 let jetRun = null; const JET_DIST = 3.0;
 // one step state machine drives clip lifetime, facing and stopping
 let step = null; // { i, end } in wall-clock seconds; null = plain walk
@@ -3068,6 +3162,10 @@ const _ray = new THREE.Raycaster(), _nd = new THREE.Vector2();
 function resetStage() {
   if (paused) togglePause(); // a restart must unfreeze: playSong refuses to start a suspended context
   finishMode = false;
+  if (jetRun && jetRun.mdl) { // a reset mid-fall/jet must not leave the body tilted or sunk
+    jetRun.mdl.position.y = MORPH_LIFT;
+    jetRun.mdl.rotation.set(0, 0, 0);
+  }
   jetRun = null;
   endStep(0.2);
   player.position.set(WANT_STAGE ? RW - 0.7 : 0, 0, -5); // restart goes back to the stage's start
@@ -3206,6 +3304,11 @@ function frame() {
   skyMat.uniforms.mid.value.setHex(pal.fog);
   skyMat.uniforms.bot.value.setHex(pal.horizon);
   far.position.z = z;
+  if (typeof starPts !== 'undefined') {
+    starPts.position.z = z;
+    starMat.uniforms.uT.value = performance.now() / 1000;
+    starMat.uniforms.uNight.value = Math.max(0, 1 - 1.3 * SUNRISE);
+  }
   if (WANT_STAGE) { // the lawn carries its own color; palette would brown it out
     ground.material.color.setHex(0xd8e2c2).lerp(_ca.setHex(0x4e5364), 1 - SUNRIN);
     for (const e of edgeLines) if (e.material.normalMap) e.material.color.setHex(0xbfb096).lerp(_ca.setHex(0x6a6258), 1 - SUNRIN);
@@ -3241,10 +3344,10 @@ function frame() {
           const w = (lie > 0 && up < 1) ? Math.min(lie, 1 - up) : 0;
           jetRun.mdl.rotation.x = 1.75 * lie - 1.78 * up + 0.06 * Math.sin(13 * u) * w;
           jetRun.mdl.rotation.z = 0.10 * Math.sin(9 * u) * w;
-          jetRun.mdl.position.y = 0.27 * lie - 0.27 * up + 0.035 * Math.sin(10 * u + 1) * w;
+          jetRun.mdl.position.y = MORPH_LIFT + 0.27 * lie - 0.27 * up + 0.035 * Math.sin(10 * u + 1) * w;
         } else {
           const air = Math.min(1, Math.max(0, (u - 0.34) / 0.61));
-          jetRun.mdl.position.y = 0.75 * Math.sin(Math.PI * air); // higher still: 75cm arc
+          jetRun.mdl.position.y = MORPH_LIFT + 0.75 * Math.sin(Math.PI * air); // higher still: 75cm arc
           jetRun.mdl.rotation.x = -0.35 * Math.sin(Math.PI * air);
           jetRun.mdl.rotation.y = Math.PI * 6 * seg(0.36, 0.86);  // three spins, ends facing forward
           // jet exhaust: hot sparks raining out from under the feet while airborne
@@ -3280,7 +3383,7 @@ function frame() {
       }
       if (u >= 1) {
         if (jetRun.kind !== 'fall') { spawnSparks(); spawnSparks(); } // landing puff, double
-        if (jetRun.mdl) { jetRun.mdl.position.y = 0; jetRun.mdl.rotation.x = 0; jetRun.mdl.rotation.y = 0; jetRun.mdl.rotation.z = 0; }
+        if (jetRun.mdl) { jetRun.mdl.position.y = MORPH_LIFT; jetRun.mdl.rotation.x = 0; jetRun.mdl.rotation.y = 0; jetRun.mdl.rotation.z = 0; }
         jetRun = null;
       }
     }
